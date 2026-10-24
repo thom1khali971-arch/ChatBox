@@ -1,0 +1,13 @@
+{
+  "name": "chatbox-realtime",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Chat em tempo real com salas, reações e área administrativa (banir, mutar, expulsar) em Node.js puro.",
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
