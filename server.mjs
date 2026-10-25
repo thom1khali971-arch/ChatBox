@@ -1455,7 +1455,7 @@ async function handle(req, res) {
     if (pathname === '/api/info' && method === 'GET') {
       return sendJson(res, 200, {
         app: 'ChatBox',
-        version: '1.0.0',
+        version: '1.1.0',
         downloadUrl: `${originFor(req)}/api/download`,
         appUrl: originFor(req),
         passwordIsDefault: PASSWORD_IS_DEFAULT,

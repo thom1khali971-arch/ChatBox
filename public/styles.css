@@ -2372,6 +2372,30 @@ a {
     gap: 9px;
   }
 
+  .msg-head {
+    padding-right: 136px;
+  }
+
+  .msg-actions {
+    position: absolute;
+    top: 4px;
+    right: 6px;
+    width: auto;
+    margin-left: 0;
+    padding: 2px 4px;
+    border: 1px solid rgba(148, 163, 184, 0.16);
+    border-radius: 10px;
+    background: rgba(6, 12, 24, 0.72);
+    backdrop-filter: blur(8px);
+    opacity: 0.72;
+  }
+
+  .msg-actions:hover,
+  .msg:focus-within .msg-actions,
+  .msg:hover .msg-actions {
+    opacity: 1;
+  }
+
   .msg-avatar-slot {
     width: 38px;
   }
