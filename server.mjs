@@ -8,6 +8,7 @@ const ROOT = import.meta.dirname
 const PUBLIC_DIR = join(ROOT, 'public')
 const DATA_DIR = join(ROOT, 'data')
 const STATE_FILE = join(DATA_DIR, 'state.json')
+const MESSAGES_FILE = join(DATA_DIR, 'messages.json')
 const UPLOADS_DIR = join(DATA_DIR, 'uploads')
 const PORT = Number(process.env.PORT || 3000)
 const HOST = '0.0.0.0'
@@ -22,6 +23,7 @@ const MAX_BODY = 64 * 1024
 const MAX_UPLOAD = 40 * 1024 * 1024
 const MAX_HISTORY = 200
 const MAX_NOTICES = 80
+const MAX_REACTION_DEVICES = 2000
 const REACTIONS = ['♥', '★', '✧', '✓']
 const RESERVED = new Set(['admin', 'administrador', 'moderador', 'sistema', 'system', 'chatbox', 'suporte', 'staff'])
 
@@ -362,6 +364,7 @@ function getOrCreateClient(req, res) {
       ip,
       name: null,
       nameLower: null,
+      avatar: null,
       color: colorFor(deviceId),
       joined: false,
       online: false,
@@ -399,6 +402,7 @@ function profileFor(session) {
   return {
     id: session.publicId,
     name: session.name,
+    avatar: session.avatar || null,
     color: session.color,
     isAdmin: isAdmin(session),
     muted: session.mutedUntil > now(),
@@ -728,6 +732,7 @@ function createMessage(session, room, text, attachment = null) {
     user: {
       id: session.publicId,
       name: session.name,
+      avatar: session.avatar || null,
       color: session.color,
       admin: isAdmin(session)
     }
@@ -736,6 +741,7 @@ function createMessage(session, room, text, attachment = null) {
   list.push(message)
   if (list.length > MAX_HISTORY) list.splice(0, list.length - MAX_HISTORY)
   broadcast('message', { message: decorateMessage(message) })
+  scheduleMessagesSave()
   return message
 }
 
@@ -748,11 +754,12 @@ function createNotice(text, level = 'info', actor = null) {
     kind: 'notice',
     level,
     text,
-    user: actor ? { name: actor.name, color: actor.color, admin: isAdmin(actor) } : null
+    user: actor ? { name: actor.name, avatar: actor.avatar || null, color: actor.color, admin: isAdmin(actor) } : null
   }
   notices.push(notice)
   if (notices.length > MAX_NOTICES) notices.splice(0, notices.length - MAX_NOTICES)
   broadcast('notice', decorateMessage(notice))
+  scheduleMessagesSave()
   return notice
 }
 
@@ -1030,6 +1037,7 @@ function deleteMessage(actor, messageId) {
     message.text = ''
     message.reactions = {}
     broadcast('message:update', decorateMessage(message))
+    scheduleMessagesSave()
     audit(actor, 'delete-message', message.user?.name || '', id)
     createNotice(`Admin ${actor.name} removeu uma mensagem de ${message.user?.name || 'um usuário'}.`, 'warn', actor)
     return { message: 'Mensagem removida.' }
@@ -1073,6 +1081,80 @@ function loadState() {
     }
   } catch {
     // First run or unreadable state: start clean.
+  }
+}
+
+let messagesSaveTimer = null
+
+function scheduleMessagesSave() {
+  if (messagesSaveTimer) clearTimeout(messagesSaveTimer)
+  messagesSaveTimer = setTimeout(() => {
+    messagesSaveTimer = null
+    saveMessages()
+  }, 300)
+}
+
+function saveMessages() {
+  try {
+    mkdirSync(DATA_DIR, { recursive: true })
+    const payload = {
+      version: 1,
+      sequence,
+      messages: Object.fromEntries([...messages].map(([room, list]) => [room, list])),
+      notices,
+      savedAt: now()
+    }
+    const temp = `${MESSAGES_FILE}.tmp`
+    writeFileSync(temp, JSON.stringify(payload))
+    renameSync(temp, MESSAGES_FILE)
+  } catch (error) {
+    console.error(`[chatbox] não foi possível salvar as mensagens: ${error.message}`)
+  }
+}
+
+function normalizeReactions(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {}
+  const normalized = {}
+  for (const [symbol, devices] of Object.entries(raw)) {
+    if (!symbol || symbol.length > 16) continue
+    if (Array.isArray(devices)) {
+      const valid = devices.filter(device => typeof device === 'string' && device).slice(0, MAX_REACTION_DEVICES)
+      if (valid.length) normalized[symbol] = valid
+    } else {
+      const count = Math.min(MAX_REACTION_DEVICES, Math.max(0, Math.floor(Number(devices) || 0)))
+      if (count) normalized[symbol] = Array.from({ length: count }, (_, index) => `legacy:${index}`)
+    }
+  }
+  return normalized
+}
+
+function loadMessages() {
+  try {
+    const payload = JSON.parse(readFileSync(MESSAGES_FILE, 'utf8'))
+    for (const room of ROOMS) {
+      const list = Array.isArray(payload.messages?.[room.id]) ? payload.messages[room.id] : []
+      const valid = list
+        .filter(message => message && message.id && Number.isFinite(Number(message.seq)))
+        .map(message => ({
+          ...message,
+          seq: Number(message.seq),
+          ts: Number(message.ts) || now(),
+          reactions: normalizeReactions(message.reactions)
+        }))
+        .slice(-MAX_HISTORY)
+      messages.set(room.id, valid)
+    }
+    if (Array.isArray(payload.notices)) {
+      notices.length = 0
+      notices.push(...payload.notices.filter(notice => notice && notice.id).slice(-MAX_NOTICES))
+    }
+    sequence = Number.isFinite(Number(payload.sequence)) ? Math.max(0, Math.floor(Number(payload.sequence))) : 0
+    for (const list of messages.values()) {
+      for (const message of list) sequence = Math.max(sequence, Number(message.seq) || 0)
+    }
+    for (const notice of notices) sequence = Math.max(sequence, Number(notice.seq) || 0)
+  } catch {
+    // First run or unreadable history: start with the welcome notice only.
   }
 }
 
@@ -1497,6 +1579,38 @@ async function handle(req, res) {
       })
     }
 
+    if (pathname === '/api/profile/avatar' && method === 'POST') {
+      requireSession(session)
+      const ban = activeBanFor(session)
+      if (ban) return sendJson(res, 403, { error: 'banned', message: 'Você foi banido deste chat.' })
+      const mime = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase()
+      const meta = UPLOAD_TYPES[mime]
+      if (!meta || meta.kind !== 'image') {
+        throw httpError(415, 'unsupported_avatar', 'Envie uma foto em PNG, JPG, GIF, WebP ou AVIF.')
+      }
+      const declared = Number(req.headers['content-length'] || 0)
+      if (declared > meta.max) {
+        throw httpError(413, 'file_too_large', `O limite para a foto de perfil é ${Math.round(meta.max / 1024 / 1024)} MB.`)
+      }
+      const perSession = rateLimit(`avatar:${session.sid}`, 6, 60000)
+      if (!perSession.ok) throw httpError(429, 'avatar_slow_down', `Aguarde ${perSession.retryAfter}s para trocar a foto novamente.`)
+      const perIp = rateLimit(`avatar-ip:${session.ip}`, 20, 10 * 60000)
+      if (!perIp.ok) throw httpError(429, 'avatar_slow_down', 'Muitas trocas de foto. Aguarde um pouco.')
+      const buffer = await readBinary(req, meta.max)
+      const record = storeUpload(session, buffer, mime, req.headers['x-file-name'])
+      record.used = true
+      session.avatar = record.url
+      for (const list of messages.values()) {
+        for (const message of list) {
+          if (message.user?.id === session.publicId) message.user.avatar = session.avatar
+        }
+      }
+      broadcastUsers()
+      broadcast('avatar', { user: profileFor(session) })
+      scheduleMessagesSave()
+      return sendJson(res, 200, { you: profileFor(session), avatar: session.avatar })
+    }
+
     if (pathname === '/api/profile' && method === 'POST') {
       requireSession(session)
       const body = await readJson(req)
@@ -1680,6 +1794,7 @@ async function handle(req, res) {
         else delete message.reactions[symbol]
         const payload = decorateMessage(message, deviceId)
         broadcast('message:update', { ...decorateMessage(message), mine: [] })
+        scheduleMessagesSave()
         return sendJson(res, 200, { message: payload })
       }
       throw httpError(404, 'message_not_found', 'Mensagem não encontrada.')
@@ -1793,7 +1908,10 @@ async function handle(req, res) {
 }
 
 loadState()
-createNotice('Bem-vindo ao ChatBox: converse em tempo real, reaja às mensagens e use a área administrativa para moderar.', 'info')
+loadMessages()
+if (![...messages.values()].some(list => list.length) && !notices.length) {
+  createNotice('Bem-vindo ao ChatBox: converse em tempo real, reaja às mensagens e use a área administrativa para moderar.', 'info')
+}
 
 if (process.env.OPENCODE_WEB_DIR) {
   try {
@@ -2019,7 +2137,9 @@ maintenance.unref()
 
 function shutdown() {
   if (saveTimer) clearTimeout(saveTimer)
+  if (messagesSaveTimer) clearTimeout(messagesSaveTimer)
   saveState()
+  saveMessages()
   server.close(() => process.exit(0))
   setTimeout(() => process.exit(0), 1500).unref()
 }

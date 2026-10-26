@@ -98,7 +98,7 @@
         </div>
 
         <div class="top-actions">
-          <button class="user-chip" id="rename-open" type="button" title="Alterar apelido">
+          <button class="user-chip" id="rename-open" type="button" title="Alterar perfil" aria-label="Alterar perfil">
             <span class="avatar avatar-0" id="me-avatar">?</span>
             <span class="user-chip-copy">
               <strong id="me-name">Visitante</strong>
@@ -202,13 +202,23 @@
       <header class="modal-head">
         <div>
           <p class="eyebrow">Sua identidade</p>
-          <h2 id="rename-title">Escolha um apelido</h2>
+          <h2 id="rename-title">Seu perfil</h2>
         </div>
         <button class="icon-btn" type="button" data-close-modal="rename" aria-label="Fechar">
           <svg class="icon"><use href="#i-close"/></svg>
         </button>
       </header>
-      <p class="modal-copy">Seu apelido aparece para todos na sala. Entre 3 e 20 caracteres.</p>
+      <p class="modal-copy">Seu apelido e sua foto aparecem para todos na sala.</p>
+      <div class="profile-editor">
+        <span class="avatar avatar-lg avatar-0" id="profile-avatar-preview">?</span>
+        <div class="profile-editor-copy">
+          <strong>Foto de perfil</strong>
+          <span id="avatar-status">PNG, JPG, GIF, WebP ou AVIF · recorte e otimização automáticos</span>
+        </div>
+        <button class="btn btn-soft" id="avatar-pick" type="button">Trocar foto</button>
+        <input type="file" id="avatar-file" accept="image/png,image/jpeg,image/gif,image/webp,image/avif" hidden>
+      </div>
+      <p class="form-error" id="avatar-error" hidden></p>
       <form id="rename-form">
         <label class="field">
           <span>Apelido</span>
@@ -248,7 +258,7 @@
           Entrar no painel
         </button>
       </form>
-      <p class="hint" id="admin-password-hint">Senha padrão: <code>chatbox-admin</code>. Defina <code>ADMIN_PASSWORD</code> em produção.</p>
+      <p class="hint" id="admin-password-hint" hidden></p>
     </div>
 
     <div class="admin-panel" id="admin-panel" hidden>

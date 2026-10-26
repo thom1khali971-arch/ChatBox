@@ -6,11 +6,13 @@ const UPLOAD_LIMITS = {
   video: 40 * 1024 * 1024,
   audio: 15 * 1024 * 1024
 }
+const AVATAR_SOURCE_LIMIT = 20 * 1024 * 1024
 const UPLOAD_TYPES = {
   image: ['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/avif'],
   video: ['video/mp4', 'video/webm', 'video/ogg', 'video/quicktime'],
   audio: ['audio/mpeg', 'audio/mp3', 'audio/ogg', 'audio/wav', 'audio/x-wav', 'audio/webm', 'audio/mp4', 'audio/x-m4a', 'audio/aac', 'audio/flac']
 }
+const AVATAR_COLORS = 8
 const timeFormat = new Intl.DateTimeFormat('pt-BR', { hour: '2-digit', minute: '2-digit' })
 const dateTimeFormat = new Intl.DateTimeFormat('pt-BR', { dateStyle: 'short', timeStyle: 'short' })
 
@@ -43,6 +45,8 @@ const state = {
   musicPaused: false,
   musicNeedsGesture: false
 }
+
+let avatarUploading = false
 
 const $ = id => document.getElementById(id)
 const messageScroll = $('message-scroll')
@@ -85,6 +89,103 @@ function initial(name) {
   const characters = Array.from(String(name || '?'))
   return (characters[0] || '?').toLocaleUpperCase('pt-BR')
 }
+
+function applyAvatar(node, user = {}) {
+  if (!node) return
+  for (let index = 0; index < AVATAR_COLORS; index += 1) node.classList.remove(`avatar-${index}`)
+  node.classList.add(`avatar-${user.color ?? 0}`)
+  node.classList.toggle('has-photo', Boolean(user.avatar))
+  if (user.avatar) {
+    node.textContent = ''
+    node.style.backgroundImage = `url(${JSON.stringify(user.avatar)})`
+  } else {
+    node.style.backgroundImage = ''
+    node.textContent = initial(user.name)
+  }
+  if (user.name) node.title = user.name
+}
+
+const saveData = Boolean(navigator.connection && navigator.connection.saveData)
+const lazyVideos = new Set()
+let videoCheckTimer = 0
+let videoCheckSuppressed = false
+let videoCheckReleaseTimer = 0
+
+function suppressVideoChecks() {
+  videoCheckSuppressed = true
+  clearTimeout(videoCheckReleaseTimer)
+  videoCheckReleaseTimer = setTimeout(releaseVideoChecks, 1200)
+}
+
+function releaseVideoChecks() {
+  videoCheckSuppressed = false
+  clearTimeout(videoCheckReleaseTimer)
+  scheduleVideoCheck()
+}
+
+function loadVideoPreview(video) {
+  if (!video || !video.isConnected || video.dataset.started || video.preload !== 'none') return
+  video.preload = 'metadata'
+  video.load()
+}
+
+function checkVisibleVideos() {
+  videoCheckTimer = 0
+  if (saveData || videoCheckSuppressed) return
+  const margin = 360
+  const height = window.innerHeight
+  for (const video of [...lazyVideos]) {
+    if (!video.isConnected) {
+      lazyVideos.delete(video)
+      continue
+    }
+    if (video.dataset.started || video.preload !== 'none') {
+      lazyVideos.delete(video)
+      continue
+    }
+    const rect = video.getBoundingClientRect()
+    if (rect.bottom < -margin || rect.top > height + margin) continue
+    lazyVideos.delete(video)
+    loadVideoPreview(video)
+  }
+}
+
+function scheduleVideoCheck() {
+  clearTimeout(videoCheckTimer)
+  videoCheckTimer = setTimeout(checkVisibleVideos, 140)
+}
+
+function prepareVideo(video) {
+  video.width = 640
+  video.height = 360
+  video.addEventListener('loadedmetadata', () => {
+    lazyVideos.delete(video)
+    if (!video.videoWidth || !video.videoHeight) return
+    video.width = video.videoWidth
+    video.height = video.videoHeight
+  }, { once: true })
+  video.addEventListener('pointerdown', () => {
+    lazyVideos.delete(video)
+    loadVideoPreview(video)
+  }, { once: true, passive: true })
+  video.addEventListener('play', () => {
+    video.dataset.started = '1'
+    lazyVideos.delete(video)
+  }, { once: true })
+  if (!saveData) {
+    lazyVideos.add(video)
+    scheduleVideoCheck()
+  }
+}
+
+if (messageScroll) {
+  messageScroll.addEventListener('scroll', scheduleVideoCheck, { passive: true })
+  messageScroll.addEventListener('scrollend', releaseVideoChecks, { passive: true })
+}
+window.addEventListener('resize', scheduleVideoCheck, { passive: true })
+
+const videoListObserver = new MutationObserver(scheduleVideoCheck)
+videoListObserver.observe(messageList, { childList: true })
 
 function timeOf(ts) {
   try {
@@ -223,13 +324,18 @@ function renderAttachment(attachment) {
     return wrap
   }
   if (attachment.type === 'video') {
+    wrap.classList.add('has-video')
     const video = element('video')
     video.controls = true
-    video.preload = 'metadata'
+    video.preload = 'none'
     video.playsInline = true
+    video.setAttribute('playsinline', '')
+    video.setAttribute('webkit-playsinline', '')
     video.src = attachment.url
     video.title = attachment.name || 'Vídeo enviado'
+    video.setAttribute('aria-label', attachment.name || 'Vídeo enviado')
     wrap.append(video)
+    prepareVideo(video)
     return wrap
   }
   if (attachment.type === 'audio') {
@@ -284,8 +390,9 @@ function renderMessage(message, previous) {
   if (compact) {
     avatarSlot.append(element('span', 'compact-time', timeOf(message.ts)))
   } else {
-    const avatar = element('span', `avatar avatar-${message.user?.color ?? 0} avatar-lg`, initial(message.user?.name))
-    avatar.title = message.user?.name || ''
+    const avatar = element('span', 'avatar avatar-lg')
+    applyAvatar(avatar, message.user)
+    if (message.user?.id) avatar.dataset.userId = message.user.id
     avatarSlot.append(avatar)
   }
   row.append(avatarSlot)
@@ -373,7 +480,10 @@ function renderMessages({ scroll = false, smooth = false } = {}) {
   $('empty-state').hidden = hasChat
   state.animateId = null
 
-  if (scroll || nearBottom) scrollToBottom(smooth ? 'smooth' : 'auto')
+  if (scroll || nearBottom) {
+    suppressVideoChecks()
+    scrollToBottom(smooth ? 'smooth' : 'auto')
+  }
   updateJumpButton()
 }
 
@@ -423,7 +533,9 @@ function renderUsers() {
       item.dataset.target = user.name
       item.title = `Selecionar ${user.name} no painel`
     }
-    const avatar = element('span', `avatar avatar-sm avatar-${user.color}`, initial(user.name))
+    const avatar = element('span', 'avatar avatar-sm')
+    applyAvatar(avatar, user)
+    avatar.dataset.userId = user.id
     item.append(avatar)
     const copy = element('span', 'user-copy')
     const name = element('strong')
@@ -449,14 +561,31 @@ function applyMe(you) {
   if (!you) return
   state.me = you
   $('me-name').textContent = you.name
-  const avatar = $('me-avatar')
-  avatar.className = `avatar avatar-${you.color}`
-  avatar.textContent = initial(you.name)
+  applyAvatar($('me-avatar'), you)
+  applyAvatar($('profile-avatar-preview'), you)
   let role = 'online'
   if (you.isAdmin) role = 'administrador'
   else if (you.muted) role = 'silenciado'
   $('me-role').textContent = role
   updateComposer()
+}
+
+function applyAvatarUpdate(user) {
+  if (!user?.id) return
+  if (state.me?.id === user.id) {
+    state.me = { ...state.me, ...user }
+    applyMe(state.me)
+  } else {
+    const known = state.users.find(item => item.id === user.id)
+    if (known) Object.assign(known, user)
+  }
+  for (const message of state.messages) {
+    if (message.user?.id !== user.id) continue
+    message.user = { ...message.user, avatar: user.avatar, name: user.name || message.user.name, color: user.color ?? message.user.color }
+  }
+  for (const node of document.querySelectorAll('.avatar[data-user-id]')) {
+    if (node.dataset.userId === user.id) applyAvatar(node, user)
+  }
 }
 
 function isMuted() {
@@ -536,22 +665,54 @@ function syncHello(data) {
 
 function upsertMessage(message) {
   const index = state.messages.findIndex(item => item.id === message.id)
-  if (index >= 0) state.messages[index] = message
-  else state.messages.push(message)
+  if (index >= 0) {
+    state.messages[index] = message
+    return false
+  }
+  state.messages.push(message)
   state.messages.sort((a, b) => a.seq - b.seq)
   if (state.messages.length > 700) state.messages.splice(0, state.messages.length - 700)
+  return true
+}
+
+function appendMessageRow(message) {
+  const visible = visibleMessages()
+  const previous = visible.length > 1 ? visible[visible.length - 2] : null
+  messageList.append(renderMessage(message, previous))
+  const hasChat = visible.some(item => item.kind === 'chat')
+  $('empty-state').hidden = hasChat
 }
 
 function handleIncoming(message) {
-  upsertMessage(message)
+  const added = upsertMessage(message)
   const relevant = message.kind === 'notice' || message.room === state.currentRoom
   if (!relevant) {
-    if (message.kind === 'chat') {
+    if (added && message.kind === 'chat') {
       state.unread[message.room] = (state.unread[message.room] || 0) + 1
       renderRoomList()
     }
     return
   }
+  if (!added) return
+
+  const visible = visibleMessages()
+  const isLast = visible[visible.length - 1]?.id === message.id
+  const canAppend = isLast && messageList.childElementCount === visible.length - 1
+  if (canAppend) {
+    const wasNear = isNearBottom()
+    const mine = ownMessage(message)
+    state.animateId = message.id
+    appendMessageRow(message)
+    state.animateId = null
+    if (wasNear || mine) {
+      scrollToBottom('auto')
+    } else if (message.kind === 'chat') {
+      state.unseen += 1
+    }
+    updateJumpButton()
+    return
+  }
+
   const wasNear = isNearBottom()
   const mine = ownMessage(message)
   if (wasNear || mine) {
@@ -619,6 +780,9 @@ function dispatchEvent(type, data) {
       state.users = data.users || []
       renderUsers()
       if (state.overview) fillTargets()
+      break
+    case 'avatar':
+      applyAvatarUpdate(data.user)
       break
     case 'typing':
       if (!data.user || data.room !== state.currentRoom) return
@@ -742,7 +906,7 @@ function connectStream() {
   const source = new EventSource('/api/events')
   state.source = source
   source.addEventListener('open', () => setConnection(true))
-  const events = ['hello', 'message', 'notice', 'message:update', 'users', 'typing', 'you', 'state', 'music', 'cleared', 'banned', 'kicked']
+  const events = ['hello', 'message', 'notice', 'message:update', 'users', 'avatar', 'typing', 'you', 'state', 'music', 'cleared', 'banned', 'kicked']
   for (const name of events) {
     source.addEventListener(name, event => {
       try {
@@ -761,6 +925,24 @@ function connectStream() {
   })
 }
 
+async function startAudioForRoom(attachment, room) {
+  try {
+    await api('/api/music', {
+      method: 'POST',
+      body: {
+        action: 'play',
+        room,
+        attachmentId: attachment.id || '',
+        url: attachment.url,
+        title: (attachment.name || 'Áudio').replace(/\.[^.]+$/, '')
+      }
+    })
+  } catch (error) {
+    if (['banned', 'kicked'].includes(error.data?.error)) return
+    toast(`Áudio enviado, mas não foi possível tocar: ${error.message}`, 'warn')
+  }
+}
+
 async function playAttachmentTrack(button) {
   const attachmentId = button.dataset.playMusic || ''
   const url = button.dataset.musicUrl || ''
@@ -771,6 +953,7 @@ async function playAttachmentTrack(button) {
       body: { action: 'play', room: state.currentRoom, attachmentId, url, title }
     })
     toast(data.message || 'Tocando no chat.', 'success')
+    focusComposer()
   } catch (error) {
     if (['banned', 'kicked'].includes(error.data?.error)) return showBlocked(error.data)
     toast(error.message, 'danger')
@@ -822,6 +1005,14 @@ function tryPlayMusic() {
       updateMusicUi()
     })
   }
+}
+
+function retryMusicFromGesture(event) {
+  if (!state.musicNeedsGesture || state.musicPaused) return
+  const target = event.target
+  if (target instanceof Element && target.closest('#music-dock')) return
+  if (!state.music[state.currentRoom]) return
+  tryPlayMusic()
 }
 
 function syncMusic() {
@@ -894,6 +1085,7 @@ function toggleMusic() {
     musicAudio.pause()
   }
   updateMusicUi()
+  focusComposer()
 }
 
 async function stopCurrentMusic() {
@@ -969,12 +1161,16 @@ async function sendMessage() {
   try {
     const body = { text, room: state.currentRoom }
     if (pending) body.attachmentId = pending.attachment.id
+    const audio = pending?.attachment?.type === 'audio' ? pending.attachment : null
     const data = await api('/api/messages', { method: 'POST', body })
     messageInput.value = ''
     autoResize()
     clearPending()
     updateComposer()
-    if (data?.message) handleIncoming(data.message)
+    if (data?.message) {
+      handleIncoming(data.message)
+      if (audio) startAudioForRoom(audio, data.message.room || body.room)
+    }
   } catch (error) {
     if (['banned', 'kicked'].includes(error.data?.error)) return showBlocked(error.data)
     if (error.data?.error === 'muted') {
@@ -1017,6 +1213,37 @@ async function runMusicCommand(text) {
     }
     toast(error.message, 'danger')
   }
+}
+
+function focusComposer() {
+  if (!messageInput || messageInput.disabled || state.blocked) return
+  try {
+    messageInput.focus({ preventScroll: true })
+  } catch {
+    messageInput.focus()
+  }
+}
+
+function isTextEntry(element) {
+  if (!element) return false
+  if (element.isContentEditable) return true
+  if (element.matches('textarea, select')) return true
+  if (element.matches('input')) {
+    const type = (element.getAttribute('type') || 'text').toLowerCase()
+    return !['range', 'checkbox', 'radio', 'button', 'submit', 'reset', 'file', 'color'].includes(type)
+  }
+  return false
+}
+
+function typeIntoComposer(text) {
+  if (!text) return
+  const start = messageInput.selectionStart ?? messageInput.value.length
+  const end = messageInput.selectionEnd ?? start
+  messageInput.setRangeText(text, start, end, 'end')
+  focusComposer()
+  autoResize()
+  updateComposer()
+  typed()
 }
 
 function autoResize() {
@@ -1150,6 +1377,114 @@ function startUpload(file, kind) {
   xhr.send(file)
 }
 
+function setAvatarFeedback(message = '', error = false) {
+  const status = $('avatar-status')
+  const box = $('avatar-error')
+  if (box) {
+    box.textContent = error ? message : ''
+    box.hidden = !error
+  }
+  if (status && !error) status.textContent = message || 'PNG, JPG, GIF, WebP ou AVIF · recorte e otimização automáticos'
+}
+
+async function prepareAvatarImage(file) {
+  if (!('createImageBitmap' in window)) return file
+  let bitmap = null
+  try {
+    bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' })
+  } catch {
+    try {
+      bitmap = await createImageBitmap(file)
+    } catch {
+      return file
+    }
+  }
+  try {
+    const side = Math.min(bitmap.width, bitmap.height)
+    if (!side) return file
+    const size = Math.max(1, Math.min(512, side))
+    const canvas = document.createElement('canvas')
+    canvas.width = size
+    canvas.height = size
+    const context = canvas.getContext('2d')
+    if (!context) return file
+    context.drawImage(bitmap, (bitmap.width - side) / 2, (bitmap.height - side) / 2, side, side, 0, 0, size, size)
+    const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/webp', 0.9))
+    if (!blob || blob.type !== 'image/webp') return file
+    return new File([blob], 'avatar.webp', { type: 'image/webp' })
+  } finally {
+    if (typeof bitmap.close === 'function') bitmap.close()
+  }
+}
+
+function uploadAvatar(file) {
+  if (!file || avatarUploading) return
+  setAvatarFeedback('')
+  const sourceMime = inferMime(file, 'image')
+  if (!UPLOAD_TYPES.image.includes(sourceMime)) {
+    setAvatarFeedback('Escolha uma imagem PNG, JPG, GIF, WebP ou AVIF.', true)
+    return
+  }
+  if (file.size > AVATAR_SOURCE_LIMIT) {
+    setAvatarFeedback('A foto pode ter no máximo 20 MB antes do ajuste.', true)
+    return
+  }
+
+  const pick = $('avatar-pick')
+  const input = $('avatar-file')
+  avatarUploading = true
+  if (pick) pick.disabled = true
+  setAvatarFeedback('Preparando foto...')
+
+  ;(async () => {
+    const prepared = await prepareAvatarImage(file)
+    if (!prepared || prepared.size > UPLOAD_LIMITS.image) {
+      throw new Error('Não foi possível ajustar essa foto. Tente outra imagem.')
+    }
+    await new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest()
+      xhr.open('POST', '/api/profile/avatar')
+      xhr.setRequestHeader('x-requested-with', 'chatbox')
+      xhr.setRequestHeader('content-type', prepared.type || 'image/jpeg')
+      xhr.setRequestHeader('x-file-name', encodeURIComponent(prepared.name || 'avatar.webp'))
+      xhr.upload.addEventListener('progress', event => {
+        if (!event.lengthComputable) return
+        const percent = Math.min(99, Math.round((event.loaded / event.total) * 100))
+        setAvatarFeedback(`Enviando foto... ${percent}%`)
+      })
+      xhr.addEventListener('load', () => {
+        let data = null
+        try {
+          data = JSON.parse(xhr.responseText)
+        } catch {
+          data = null
+        }
+        if (xhr.status >= 200 && xhr.status < 300 && data?.you) resolve(data)
+        else reject(new Error(data?.message || 'Não foi possível trocar a foto.'))
+      })
+      xhr.addEventListener('error', () => reject(new Error('Falha de conexão ao enviar a foto.')))
+      xhr.addEventListener('abort', () => reject(new Error('Envio da foto cancelado.')))
+      xhr.send(prepared)
+    }).then(data => {
+      applyAvatarUpdate(data.you)
+      renderUsers()
+      setAvatarFeedback('Foto atualizada.')
+      toast('Foto de perfil atualizada.', 'success')
+    }).catch(error => {
+      setAvatarFeedback(error.message || 'Não foi possível trocar a foto.', true)
+    }).finally(() => {
+      avatarUploading = false
+      if (pick) pick.disabled = false
+      if (input) input.value = ''
+    })
+  })().catch(error => {
+    setAvatarFeedback(error.message || 'Não foi possível trocar a foto.', true)
+    avatarUploading = false
+    if (pick) pick.disabled = false
+    if (input) input.value = ''
+  })
+}
+
 function typed() {
   const now = Date.now()
   if (now - state.lastTypingSent < 1600 || isMuted()) return
@@ -1257,11 +1592,8 @@ function closeAdmin() {
 function renderAdminHint() {
   const hint = $('admin-password-hint')
   hint.replaceChildren()
-  if (state.admin.passwordIsDefault) {
-    hint.append(document.createTextNode('Senha padrão: '))
-    hint.append(element('code', '', 'chatbox-admin'))
-    hint.append(document.createTextNode('. Defina ADMIN_PASSWORD em produção.'))
-  } else {
+  hint.hidden = state.admin.passwordIsDefault
+  if (!state.admin.passwordIsDefault) {
     hint.textContent = 'Use a senha definida na variável de ambiente ADMIN_PASSWORD.'
   }
 }
@@ -1559,7 +1891,19 @@ function bindEvents() {
   $('rename-open').addEventListener('click', () => {
     $('rename-input').value = state.me?.name || ''
     $('rename-error').hidden = true
+    $('avatar-error').hidden = true
+    applyAvatar($('profile-avatar-preview'), state.me)
+    setAvatarFeedback('')
     showModal('rename')
+  })
+
+  $('avatar-pick').addEventListener('click', () => {
+    $('avatar-file').click()
+  })
+
+  $('avatar-file').addEventListener('change', event => {
+    const file = event.target.files?.[0]
+    if (file) uploadAvatar(file)
   })
 
   $('rename-form').addEventListener('submit', async event => {
@@ -1670,7 +2014,7 @@ function bindEvents() {
       updateComposer()
       autoResize()
     }
-    messageInput.focus()
+    focusComposer()
     messageInput.setSelectionRange(messageInput.value.length, messageInput.value.length)
   })
 
@@ -1694,6 +2038,9 @@ function bindEvents() {
     }
   })
 
+  document.addEventListener('pointerdown', retryMusicFromGesture, { capture: true, passive: true })
+  document.addEventListener('click', retryMusicFromGesture, true)
+  document.addEventListener('keydown', retryMusicFromGesture, true)
   musicToggle.addEventListener('click', toggleMusic)
   musicStop.addEventListener('click', stopCurrentMusic)
   musicAudio.addEventListener('play', () => {
@@ -1838,8 +2185,17 @@ function bindEvents() {
     }
     if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
       event.preventDefault()
-      messageInput.focus()
+      focusComposer()
+      return
     }
+    if (event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey || event.isComposing) return
+    if (event.key.length !== 1 || event.key === ' ') return
+    if (!messageInput || messageInput.disabled || state.blocked) return
+    if ($('admin-drawer') && !$('admin-drawer').hidden) return
+    if ($('rename-modal') && !$('rename-modal').hidden) return
+    if (isTextEntry(document.activeElement)) return
+    event.preventDefault()
+    typeIntoComposer(event.key)
   })
 }
 
